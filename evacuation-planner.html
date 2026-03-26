@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EVAC·AI — Emergency Evacuation System v3.0</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; }
+    body { overflow: hidden; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    const ROWS = 20, COLS = 28, CELL = 30;
+    const CELL_TYPE = { EMPTY:"empty",WALL:"wall",FIRE:"fire",SMOKE:"smoke",EXIT:"exit",START:"start",PATH:"path",VISITED:"visited" };
+    const COST = { empty:1,smoke:4,fire:20,exit:1,start:1,path:1,visited:1,wall:Infinity };
+
+    const T_DARK = {
+      name:"dark",
+      bg:"#070d15",bgCard:"#0c1622",bgPanel:"#090f1a",bgInput:"#0f1c2a",bgHover:"#131f2e",
+      border:"#1a3045",borderStrong:"#1e4060",
+      text:"#c2d8e6",textSub:"#7aa0b2",textMuted:"#3a5a6e",textDim:"#1e3a4a",
+      accent:"#00b2d4",accentDim:"rgba(0,178,212,0.12)",
+      fire:"#ff4018",fireDim:"rgba(255,64,24,0.15)",
+      smoke:"#7a6e5c",smokeDim:"rgba(122,110,92,0.12)",
+      exit:"#00cc88",exitDim:"rgba(0,204,136,0.14)",
+      start:"#0099cc",startDim:"rgba(0,153,204,0.18)",
+      path:"#f0be00",pathDim:"rgba(240,190,0,0.15)",
+      wall:"#0a1520",wallBorder:"#0d1c2a",
+      empty:"#0c1622",emptyBorder:"#101e2c",
+      grid:"#070c14",
+      danger:"#ff4018",dangerBg:"rgba(255,64,24,0.08)",
+      warn:"#f0be00",warnBg:"rgba(240,190,0,0.08)",
+      info:"#00b2d4",infoBg:"rgba(0,178,212,0.08)",
+      ok:"#00cc88",okBg:"rgba(0,204,136,0.08)",
+      header:"linear-gradient(180deg,#080e18 0%,#090f1a 100%)",
+    };
+    const T_LIGHT = {
+      name:"light",
+      bg:"#eef3f8",bgCard:"#ffffff",bgPanel:"#f5f9fc",bgInput:"#eaf0f6",bgHover:"#e0eaf2",
+      border:"#c8d8e4",borderStrong:"#9ab8cc",
+      text:"#192a38",textSub:"#527080",textMuted:"#7898a8",textDim:"#b0c8d4",
+      accent:"#0077a0",accentDim:"rgba(0,119,160,0.10)",
+      fire:"#d63000",fireDim:"rgba(214,48,0,0.10)",
+      smoke:"#7a6e5c",smokeDim:"rgba(122,110,92,0.10)",
+      exit:"#007a50",exitDim:"rgba(0,122,80,0.10)",
+      start:"#0077a0",startDim:"rgba(0,119,160,0.12)",
+      path:"#b07800",pathDim:"rgba(176,120,0,0.10)",
+      wall:"#c0ccd6",wallBorder:"#b0bec8",
+      empty:"#e0eaf2",emptyBorder:"#ccd8e4",
+      grid:"#d4dfe8",
+      danger:"#d63000",dangerBg:"rgba(214,48,0,0.06)",
+      warn:"#b07800",warnBg:"rgba(176,120,0,0.06)",
+      info:"#0077a0",infoBg:"rgba(0,119,160,0.06)",
+      ok:"#007a50",okBg:"rgba(0,122,80,0.06)",
+      header:"linear-gradient(180deg,#ffffff 0%,#f5f9fc 100%)",
+    };
+
+    const MOCK_DB = {
+      maps:{ default:{ id:"default",name:"Office Building — Floor 3",rows:ROWS,cols:COLS,created:"2026-03-01" } },
+      logs:[], sessions:[],
+    };
+    const delay = ms => new Promise(r => setTimeout(r,ms));
+    const API = {
+      async findPath(grid,start,exits) {
+        await delay(100);
+        const result = aStarMultiExit(grid,start,exits);
+        MOCK_DB.logs.push({ts:Date.now(),action:"POST /find-path",result:result?"200 OK":"404 blocked"});
+        return result;
+      },
+      async getMapMeta() { await delay(30); return MOCK_DB.maps.default; },
+      async getStats() { await delay(20); return {totalSessions:MOCK_DB.sessions.length+1,totalLogs:MOCK_DB.logs.length}; },
+    };
+
+    function h(a,b){return Math.abs(a[0]-b[0])+Math.abs(a[1]-b[1]);}
+    function aStarSingle(grid,start,goal){
+      const key=(r,c)=>`${r},${c}`,open=new Map(),g={},f={},from={};
+      const sk=key(start[0],start[1]);
+      g[sk]=0;f[sk]=h(start,goal);open.set(sk,start);
+      while(open.size){
+        let cur=null,ck=null,best=Infinity;
+        for(const[k,v]of open)if((f[k]??Infinity)<best){best=f[k];cur=v;ck=k;}
+        if(!cur)break;
+        if(cur[0]===goal[0]&&cur[1]===goal[1]){
+          const path=[];let c=ck;
+          while(c){const[r,col]=c.split(",").map(Number);path.unshift([r,col]);c=from[c];}
+          return path;
+        }
+        open.delete(ck);
+        for(const[dr,dc]of[[-1,0],[1,0],[0,-1],[0,1]]){
+          const nr=cur[0]+dr,nc=cur[1]+dc;
+          if(nr<0||nr>=ROWS||nc<0||nc>=COLS)continue;
+          const ct=grid[nr][nc];if(ct==="wall")continue;
+          const cost=COST[ct]??1;if(cost===Infinity)continue;
+          const nk=key(nr,nc),t=(g[ck]??Infinity)+cost;
+          if(t<(g[nk]??Infinity)){from[nk]=ck;g[nk]=t;f[nk]=t+h([nr,nc],goal);open.set(nk,[nr,nc]);}
+        }
+      }
+      return null;
+    }
+    function aStarMultiExit(grid,start,exits){
+      let best=null,bestScore=Infinity,bestExit=null;
+      for(const exit of exits){
+        const path=aStarSingle(grid,start,exit);if(!path)continue;
+        let score=0;for(const[r,c]of path)score+=COST[grid[r][c]]??1;
+        if(score<bestScore){bestScore=score;best=path;bestExit=exit;}
+      }
+      const maxP=best?best.length*COST.smoke:1;
+      const safety=best?Math.round(Math.max(0,100-((bestScore-best.length)/(maxP-best.length+1))*100)):0;
+      return best?{path:best,exit:bestExit,score:bestScore,safetyScore:safety,distance:best.length-1}:null;
+    }
+
+    function spreadFire(grid){
+      const next=grid.map(row=>[...row]);
+      for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+        if(grid[r][c]==="fire"&&Math.random()<0.35)
+          for(const[dr,dc]of[[-1,0],[1,0],[0,-1],[0,1]]){
+            const nr=r+dr,nc=c+dc;
+            if(nr>=0&&nr<ROWS&&nc>=0&&nc<COLS&&(next[nr][nc]==="empty"||next[nr][nc]==="smoke"))
+              next[nr][nc]=Math.random()<0.6?"fire":"smoke";
+          }
+        if(grid[r][c]==="smoke"&&Math.random()<0.12)
+          for(const[dr,dc]of[[-1,0],[1,0],[0,-1],[0,1]]){
+            const nr=r+dr,nc=c+dc;
+            if(nr>=0&&nr<ROWS&&nc>=0&&nc<COLS&&next[nr][nc]==="empty")next[nr][nc]="smoke";
+          }
+      }
+      return next;
+    }
+
+    function buildDefaultGrid(){
+      const g=Array.from({length:ROWS},()=>Array(COLS).fill("empty"));
+      for(let c=0;c<COLS;c++){g[0][c]="wall";g[ROWS-1][c]="wall";}
+      for(let r=0;r<ROWS;r++){g[r][0]="wall";g[r][COLS-1]="wall";}
+      const walls=[[3,1,3,10],[3,12,3,20],[3,22,3,27],[7,1,7,8],[7,10,7,18],[7,20,7,27],[11,1,11,6],[11,8,11,14],[11,16,11,22],[11,24,11,27],[15,1,15,10],[15,12,15,20],[15,22,15,27],[1,10,3,10],[3,10,7,10],[7,18,11,18],[1,20,3,20],[3,20,7,20],[11,6,15,6],[11,22,15,22]];
+      const doors=[[3,5],[3,16],[7,4],[7,14],[7,24],[11,11],[11,19],[15,4],[15,16]];
+      for(const[r1,c1,r2,c2]of walls)for(let r=Math.min(r1,r2);r<=Math.max(r1,r2);r++)for(let c=Math.min(c1,c2);c<=Math.max(c1,c2);c++)g[r][c]="wall";
+      for(const[r,c]of doors)g[r][c]="empty";
+      g[0][5]="exit";g[0][22]="exit";g[ROWS-1][7]="exit";g[ROWS-1][20]="exit";g[8][COLS-1]="exit";
+      g[5][15]="fire";g[5][16]="fire";g[6][15]="smoke";
+      g[10][3]="start";
+      return g;
+    }
+    function findCells(grid,type){const c=[];for(let r=0;r<ROWS;r++)for(let cc=0;cc<COLS;cc++)if(grid[r][cc]===type)c.push([r,cc]);return c;}
+
+    function App(){
+      const [isDark,setIsDark]=useState(true);
+      const T=isDark?T_DARK:T_LIGHT;
+      const [grid,setGrid]=useState(()=>buildDefaultGrid());
+      const [pathData,setPathData]=useState(null);
+      const [alerts,setAlerts]=useState([]);
+      const [simRunning,setSimRunning]=useState(false);
+      const [drawMode,setDrawMode]=useState("fire");
+      const [isDrawing,setIsDrawing]=useState(false);
+      const [loading,setLoading]=useState(false);
+      const [mapMeta,setMapMeta]=useState(null);
+      const [stats,setStats]=useState(null);
+      const [tab,setTab]=useState("map");
+      const simRef=useRef(null);
+      const alertId=useRef(0);
+
+      useEffect(()=>{API.getMapMeta().then(setMapMeta);API.getStats().then(setStats);recalcPath(grid);},[]);
+
+      const addAlert=useCallback((msg,type="warn")=>{
+        const id=++alertId.current;
+        setAlerts(a=>[...a.slice(-4),{id,msg,type}]);
+        setTimeout(()=>setAlerts(a=>a.filter(x=>x.id!==id)),4200);
+      },[]);
+
+      const recalcPath=useCallback(async(g)=>{
+        setLoading(true);
+        const starts=findCells(g,"start"),exits=findCells(g,"exit");
+        if(!starts.length||!exits.length){setLoading(false);return;}
+        const result=await API.findPath(g,starts[0],exits);
+        setPathData(result);
+        if(!result)addAlert("All exits blocked — no safe route found.","danger");
+        setLoading(false);
+      },[addAlert]);
+
+      useEffect(()=>{
+        if(simRunning){
+          simRef.current=setInterval(()=>{
+            setGrid(prev=>{
+              const next=spreadFire(prev);
+              const starts=findCells(next,"start"),exits=findCells(next,"exit");
+              if(starts.length&&exits.length)API.findPath(next,starts[0],exits).then(res=>{setPathData(res);if(!res)addAlert("CRITICAL: All evacuation routes blocked!","danger");});
+              return next;
+            });
+          },800);
+        } else clearInterval(simRef.current);
+        return()=>clearInterval(simRef.current);
+      },[simRunning,addAlert]);
+
+      const handleCell=useCallback((r,c)=>{
+        setGrid(prev=>{
+          const next=prev.map(row=>[...row]),cur=next[r][c];
+          if(drawMode==="eraser"){if(cur!=="exit")next[r][c]="empty";}
+          else if(drawMode==="start"){
+            for(let i=0;i<ROWS;i++)for(let j=0;j<COLS;j++)if(next[i][j]==="start")next[i][j]="empty";
+            if(["empty","path","visited"].includes(cur))next[r][c]="start";
+          }else if(["empty","path","visited"].includes(cur))next[r][c]=drawMode;
+          recalcPath(next);return next;
+        });
+      },[drawMode,recalcPath]);
+
+      const resetMap=()=>{const g=buildDefaultGrid();setGrid(g);setSimRunning(false);recalcPath(g);addAlert("Map reset to default layout.","info");};
+
+      const displayGrid=grid.map(row=>[...row]);
+      if(pathData)for(const[r,c]of pathData.path)if(displayGrid[r][c]==="empty")displayGrid[r][c]="path";
+
+      const safetyColor=pathData?(pathData.safetyScore>70?T.exit:pathData.safetyScore>40?T.path:T.fire):T.textMuted;
+
+      return(
+        <div style={{fontFamily:"'JetBrains Mono','Fira Code','Courier New',monospace",background:T.bg,minHeight:"100vh",color:T.text,display:"flex",flexDirection:"column",transition:"background 0.4s,color 0.4s"}}>
+          <style>{`
+            @keyframes pulseAnim{0%,100%{opacity:1}50%{opacity:0.3}}
+            @keyframes spinAnim{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+            @keyframes slideIn{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:translateX(0)}}
+            @keyframes fireAnim{0%{transform:scale(1) rotate(-1deg)}50%{transform:scale(1.1) rotate(1deg)}100%{transform:scale(0.95)}}
+            @keyframes popIn{0%{transform:scale(0)}70%{transform:scale(1.25)}100%{transform:scale(1)}}
+            @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+            *{box-sizing:border-box}
+            ::-webkit-scrollbar{width:4px;height:4px}
+            ::-webkit-scrollbar-track{background:transparent}
+            ::-webkit-scrollbar-thumb{background:${T.border};border-radius:2px}
+          `}</style>
+
+          {/* HEADER */}
+          <header style={{background:T.header,borderBottom:`1px solid ${T.border}`,padding:"0 20px",height:58,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,transition:"background 0.4s,border-color 0.4s"}}>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <div style={{width:38,height:38,background:`linear-gradient(135deg,${T.fire}ee,${T.fire}88)`,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontSize:19,boxShadow:`0 2px 14px ${T.fireDim}`}}>🔥</div>
+              <div>
+                <div style={{fontSize:15,fontWeight:800,letterSpacing:3,color:T.text,textTransform:"uppercase"}}>EVAC<span style={{color:T.fire}}>·</span>AI</div>
+                <div style={{fontSize:8,color:T.textMuted,letterSpacing:3}}>EMERGENCY EVACUATION SYSTEM v3.0</div>
+              </div>
+              {mapMeta&&<div style={{marginLeft:14,paddingLeft:14,borderLeft:`1px solid ${T.border}`}}>
+                <div style={{fontSize:10,color:T.accent,fontWeight:600}}>{mapMeta.name}</div>
+                <div style={{fontSize:9,color:T.textMuted}}>{mapMeta.rows}×{mapMeta.cols} · ID: {mapMeta.id}</div>
+              </div>}
+            </div>
+
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <div style={{display:"flex",alignItems:"center",gap:7,padding:"5px 13px",borderRadius:20,background:simRunning?T.dangerBg:T.okBg,border:`1px solid ${simRunning?T.fire:T.exit}44`,transition:"all 0.4s"}}>
+                <div style={{width:7,height:7,borderRadius:"50%",background:simRunning?T.fire:T.exit,boxShadow:`0 0 7px ${simRunning?T.fire:T.exit}`,animation:simRunning?"pulseAnim 0.7s infinite":"none"}}/>
+                <span style={{fontSize:9,letterSpacing:2,color:simRunning?T.fire:T.exit}}>{simRunning?"SIM ACTIVE":"STANDBY"}</span>
+              </div>
+              <button onClick={()=>setIsDark(d=>!d)} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 14px",background:T.bgInput,border:`1px solid ${T.border}`,borderRadius:22,cursor:"pointer",color:T.text,fontFamily:"inherit",fontSize:10,letterSpacing:1,transition:"all 0.3s"}}>
+                <span style={{fontSize:15}}>{isDark?"☀":"🌙"}</span>
+                <span style={{color:T.textSub}}>{isDark?"LIGHT MODE":"DARK MODE"}</span>
+              </button>
+            </div>
+          </header>
+
+          {/* TABS */}
+          <div style={{display:"flex",borderBottom:`1px solid ${T.border}`,background:T.bgPanel,flexShrink:0,transition:"background 0.4s"}}>
+            {["map","analytics","logs"].map(t=>(
+              <button key={t} onClick={()=>setTab(t)} style={{background:"transparent",border:"none",borderBottom:`2.5px solid ${tab===t?T.accent:"transparent"}`,color:tab===t?T.accent:T.textMuted,padding:"10px 20px",fontSize:9,letterSpacing:2,textTransform:"uppercase",cursor:"pointer",transition:"all 0.2s",fontFamily:"inherit"}}>
+                {t==="map"?"🗺 MAP":t==="analytics"?"📊 ANALYTICS":"📋 LOGS"}
+              </button>
+            ))}
+          </div>
+
+          {/* TOAST ALERTS */}
+          <div style={{position:"fixed",top:72,right:14,zIndex:300,display:"flex",flexDirection:"column",gap:6,pointerEvents:"none"}}>
+            {alerts.map(a=>{
+              const col=a.type==="danger"?T.danger:a.type==="info"?T.accent:T.warn;
+              return(
+                <div key={a.id} style={{background:T.bgCard,border:`1px solid ${col}50`,borderLeft:`3px solid ${col}`,padding:"9px 14px",borderRadius:8,fontSize:10,color:T.text,maxWidth:300,animation:"slideIn 0.3s ease",boxShadow:`0 6px 24px rgba(0,0,0,${isDark?0.4:0.12})`}}>
+                  {a.msg}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* BODY */}
+          <div style={{display:"flex",flex:1,overflow:"hidden"}}>
+
+            {/* SIDEBAR */}
+            <aside style={{width:224,background:T.bgPanel,borderRight:`1px solid ${T.border}`,padding:"14px 12px",display:"flex",flexDirection:"column",gap:10,overflowY:"auto",flexShrink:0,transition:"background 0.4s,border-color 0.4s"}}>
+
+              <Card T={T}>
+                <Label T={T}>Path Metrics</Label>
+                {loading
+                  ?<div style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0"}}>
+                    <div style={{width:11,height:11,border:`2px solid ${T.accent}`,borderTop:"2px solid transparent",borderRadius:"50%",animation:"spinAnim 0.8s linear infinite"}}/>
+                    <span style={{fontSize:9,color:T.textMuted}}>Computing A*…</span>
+                  </div>
+                  :pathData
+                    ?<>
+                      <MRow T={T} k="DISTANCE" v={`${pathData.distance} cells`} c={T.accent}/>
+                      <MRow T={T} k="EST. TIME" v={`~${Math.round(pathData.distance*0.8)}s`} c={T.path}/>
+                      <MRow T={T} k="BEST EXIT" v={`[${pathData.exit[0]},${pathData.exit[1]}]`} c={T.exit}/>
+                      <div style={{marginTop:8}}>
+                        <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                          <span style={{fontSize:8,color:T.textMuted,letterSpacing:1}}>SAFETY SCORE</span>
+                          <span style={{fontSize:13,fontWeight:700,color:safetyColor}}>{pathData.safetyScore}%</span>
+                        </div>
+                        <div style={{background:T.bgInput,borderRadius:5,height:7,overflow:"hidden",border:`1px solid ${T.border}`}}>
+                          <div style={{width:`${pathData.safetyScore}%`,height:"100%",background:`linear-gradient(90deg,${safetyColor}70,${safetyColor})`,borderRadius:5,transition:"width 0.6s ease"}}/>
+                        </div>
+                      </div>
+                    </>
+                    :<div style={{fontSize:10,color:T.danger,padding:"4px 0"}}>⚠ No path found</div>
+                }
+              </Card>
+
+              <Card T={T}>
+                <Label T={T}>Hazard Tools</Label>
+                {[
+                  {mode:"fire",  icon:"🔥",label:"Fire",    col:T.fire},
+                  {mode:"smoke", icon:"💨",label:"Smoke",   col:T.smoke},
+                  {mode:"wall",  icon:"⬛",label:"Wall",    col:T.textMuted},
+                  {mode:"start", icon:"📍",label:"Set Start",col:T.accent},
+                  {mode:"eraser",icon:"✕", label:"Eraser",  col:T.textDim},
+                ].map(({mode,icon,label,col})=>(
+                  <button key={mode} onClick={()=>setDrawMode(mode)} style={{width:"100%",background:drawMode===mode?`${col}18`:"transparent",border:`1px solid ${drawMode===mode?col:T.border}`,color:drawMode===mode?col:T.textSub,padding:"7px 10px",borderRadius:7,fontSize:9,letterSpacing:1,cursor:"pointer",textAlign:"left",marginBottom:4,display:"flex",alignItems:"center",gap:8,transition:"all 0.15s",fontFamily:"inherit"}}>
+                    <span style={{fontSize:12}}>{icon}</span>
+                    <span>{label.toUpperCase()}</span>
+                    {drawMode===mode&&<span style={{marginLeft:"auto",fontSize:7,opacity:0.7,color:col}}>● ACTIVE</span>}
+                  </button>
+                ))}
+              </Card>
+
+              <Card T={T}>
+                <Label T={T}>Simulation</Label>
+                <button onClick={()=>{setSimRunning(s=>!s);addAlert(simRunning?"Simulation paused.":"Fire simulation started!",simRunning?"info":"warn");}} style={{width:"100%",background:simRunning?T.dangerBg:T.bgInput,border:`1px solid ${simRunning?T.fire:T.border}`,color:simRunning?T.fire:T.textSub,padding:"8px 10px",borderRadius:7,fontSize:9,letterSpacing:1,cursor:"pointer",marginBottom:6,fontFamily:"inherit",transition:"all 0.2s"}}>
+                  {simRunning?"⏹  STOP SIMULATION":"▶  START FIRE SIM"}
+                </button>
+                <button onClick={resetMap} style={{width:"100%",background:T.bgInput,border:`1px solid ${T.border}`,color:T.textSub,padding:"8px 10px",borderRadius:7,fontSize:9,letterSpacing:1,cursor:"pointer",fontFamily:"inherit",transition:"all 0.2s"}}>
+                  ↺  RESET MAP
+                </button>
+              </Card>
+
+              <Card T={T}>
+                <Label T={T}>Legend</Label>
+                {[
+                  {col:T.start,label:"Your position"},
+                  {col:T.exit, label:"Emergency exit"},
+                  {col:T.path, label:"Safe route"},
+                  {col:T.smoke,label:"Smoke zone"},
+                  {col:T.fire, label:"Fire zone"},
+                  {col:T.wall, label:"Wall / structure"},
+                ].map(({col,label})=>(
+                  <div key={label} style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                    <div style={{width:9,height:9,background:col,borderRadius:2,flexShrink:0,boxShadow:`0 0 5px ${col}77`}}/>
+                    <span style={{fontSize:9,color:T.textSub}}>{label}</span>
+                  </div>
+                ))}
+              </Card>
+            </aside>
+
+            {/* MAIN CONTENT */}
+            <main style={{flex:1,overflow:"auto",padding:16,background:T.bg,transition:"background 0.4s"}}>
+              {tab==="map"&&(
+                <div style={{animation:"fadeIn 0.3s ease"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+                    <span style={{fontSize:9,color:T.textMuted,letterSpacing:1}}>INTERACTIVE MAP — click or drag to place hazards · A* recalculates in real-time</span>
+                    {loading&&<div style={{width:10,height:10,border:`2px solid ${T.accent}`,borderTop:"2px solid transparent",borderRadius:"50%",animation:"spinAnim 0.8s linear infinite",flexShrink:0}}/>}
+                  </div>
+                  <div style={{display:"inline-block",border:`2px solid ${T.borderStrong}`,borderRadius:10,overflow:"hidden",background:T.grid,boxShadow:isDark?"0 0 60px rgba(0,0,0,0.5)":"0 4px 32px rgba(0,0,0,0.12)",transition:"all 0.4s",userSelect:"none"}}
+                    onMouseLeave={()=>setIsDrawing(false)}>
+                    {displayGrid.map((row,r)=>(
+                      <div key={r} style={{display:"flex"}}>
+                        {row.map((cell,c)=>(
+                          <Cell key={c} T={T} cell={cell}
+                            onDown={()=>{setIsDrawing(true);handleCell(r,c);}}
+                            onEnter={()=>{if(isDrawing)handleCell(r,c);}}
+                            onUp={()=>setIsDrawing(false)}
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {tab==="analytics"&&<Analytics T={T} pathData={pathData} grid={grid} stats={stats} isDark={isDark}/>}
+              {tab==="logs"&&<Logs T={T} logs={MOCK_DB.logs}/>}
+            </main>
+          </div>
+        </div>
+      );
+    }
+
+    function Cell({T,cell,onDown,onEnter,onUp}){
+      const isWall=cell==="wall",isFire=cell==="fire",isSmoke=cell==="smoke";
+      const isExit=cell==="exit",isStart=cell==="start",isPath=cell==="path";
+      let bg=T.empty,bdr=T.emptyBorder;
+      if(isWall){bg=T.wall;bdr=T.wallBorder;}
+      else if(isFire){bg=`${T.fire}28`;bdr=`${T.fire}55`;}
+      else if(isSmoke){bg=`${T.smoke}22`;bdr=`${T.smoke}44`;}
+      else if(isExit){bg=`${T.exit}20`;bdr=`${T.exit}66`;}
+      else if(isStart){bg=`${T.start}25`;bdr=`${T.start}77`;}
+      else if(isPath){bg=`${T.path}20`;bdr=`${T.path}44`;}
+      return(
+        <div onMouseDown={onDown} onMouseEnter={onEnter} onMouseUp={onUp} style={{width:CELL,height:CELL,background:bg,border:`0.5px solid ${bdr}`,cursor:"crosshair",display:"flex",alignItems:"center",justifyContent:"center",transition:"background 0.12s",flexShrink:0}}>
+          {isExit &&<span style={{fontSize:12,filter:`drop-shadow(0 0 4px ${T.exit})`}}>🚪</span>}
+          {isStart&&<span style={{fontSize:12,filter:`drop-shadow(0 0 5px ${T.start})`}}>👤</span>}
+          {isFire &&<span style={{fontSize:11,display:"inline-block",animation:"fireAnim 0.55s ease-in-out infinite alternate"}}>🔥</span>}
+          {isSmoke&&<span style={{fontSize:10,opacity:0.65}}>💨</span>}
+          {isPath &&<div style={{width:5,height:5,borderRadius:"50%",background:T.path,boxShadow:`0 0 7px ${T.path}`,animation:"popIn 0.25s ease"}}/>}
+        </div>
+      );
+    }
+
+    function Card({T,children}){return <div style={{background:T.bgCard,border:`1px solid ${T.border}`,borderRadius:10,padding:"12px 13px",transition:"background 0.4s,border-color 0.4s"}}>{children}</div>;}
+    function Label({T,children}){return <div style={{fontSize:8,letterSpacing:2,color:T.textMuted,textTransform:"uppercase",marginBottom:10,paddingBottom:7,borderBottom:`1px solid ${T.border}`}}>{children}</div>;}
+    function MRow({T,k,v,c}){return <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}><span style={{fontSize:8,color:T.textMuted,letterSpacing:1}}>{k}</span><span style={{fontSize:11,fontWeight:700,color:c}}>{v}</span></div>;}
+
+    function Analytics({T,pathData,grid,stats,isDark}){
+      const fireCells=grid.flat().filter(c=>c==="fire").length;
+      const smokeCells=grid.flat().filter(c=>c==="smoke").length;
+      const hazardPct=Math.round((fireCells+smokeCells)/(ROWS*COLS)*100);
+      const kpis=[
+        {label:"Fire Cells",   v:fireCells,                             icon:"🔥",col:T.fire},
+        {label:"Smoke Cells",  v:smokeCells,                            icon:"💨",col:T.smoke},
+        {label:"Path Length",  v:pathData?`${pathData.distance} cells`:"—",icon:"🛤",col:T.path},
+        {label:"Safety Score", v:pathData?`${pathData.safetyScore}%`:"—",icon:"🛡",col:T.exit},
+        {label:"Evac Time",    v:pathData?`~${Math.round(pathData.distance*0.8)}s`:"—",icon:"⏱",col:T.accent},
+        {label:"API Logs",     v:stats?.totalLogs??0,                  icon:"📡",col:T.textSub},
+      ];
+      const bars=[
+        {label:"Fire coverage",  v:fireCells, max:60, col:T.fire},
+        {label:"Smoke coverage", v:smokeCells,max:80, col:T.smoke},
+        {label:"Total hazard %", v:hazardPct, max:100,col:T.warn},
+        {label:"Path safety",    v:pathData?.safetyScore??0,max:100,col:T.exit},
+      ];
+      const apis=[
+        {ep:"POST /api/find-path",  s:"200 OK",  col:T.exit},
+        {ep:"GET  /api/map/default",s:"200 OK",  col:T.exit},
+        {ep:"GET  /api/stats",      s:"200 OK",  col:T.exit},
+        {ep:"POST /api/log-event",  s:"200 OK",  col:T.exit},
+        {ep:"WS   /api/simulation", s:"MOCK",    col:T.warn},
+      ];
+      return(
+        <div style={{maxWidth:640,animation:"fadeIn 0.3s ease"}}>
+          <div style={{fontSize:10,letterSpacing:2,color:T.textMuted,marginBottom:16,textTransform:"uppercase"}}>Analytics Dashboard</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
+            {kpis.map(({label,v,icon,col})=>(
+              <div key={label} style={{background:T.bgCard,border:`1px solid ${T.border}`,borderRadius:10,padding:"13px 14px",transition:"background 0.4s",borderTop:`2px solid ${col}44`}}>
+                <div style={{fontSize:18,marginBottom:5}}>{icon}</div>
+                <div style={{fontSize:20,fontWeight:800,color:col,marginBottom:3}}>{v}</div>
+                <div style={{fontSize:8,color:T.textMuted,letterSpacing:1}}>{label.toUpperCase()}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{background:T.bgCard,border:`1px solid ${T.border}`,borderRadius:10,padding:"14px 16px",marginBottom:12,transition:"background 0.4s"}}>
+            <Label T={T}>Hazard Analysis</Label>
+            {bars.map(({label,v,max,col})=>(
+              <div key={label} style={{marginBottom:11}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                  <span style={{fontSize:9,color:T.textMuted,letterSpacing:1}}>{label.toUpperCase()}</span>
+                  <span style={{fontSize:10,color:col,fontWeight:700}}>{v}</span>
+                </div>
+                <div style={{background:T.bgInput,borderRadius:4,height:6,overflow:"hidden",border:`1px solid ${T.border}`}}>
+                  <div style={{width:`${Math.min(100,(v/max)*100)}%`,height:"100%",background:`linear-gradient(90deg,${col}60,${col})`,borderRadius:4,transition:"width 0.7s ease"}}/>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{background:T.bgCard,border:`1px solid ${T.border}`,borderRadius:10,padding:"14px 16px",transition:"background 0.4s"}}>
+            <Label T={T}>REST API Endpoints</Label>
+            {apis.map(({ep,s,col})=>(
+              <div key={ep} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7,padding:"6px 10px",background:T.bgInput,borderRadius:6,border:`1px solid ${T.border}`}}>
+                <span style={{fontSize:10,color:T.textSub,fontFamily:"inherit"}}>{ep}</span>
+                <span style={{fontSize:8,color:col,border:`1px solid ${col}44`,padding:"2px 8px",borderRadius:4,letterSpacing:1}}>{s}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function Logs({T,logs}){
+      return(
+        <div style={{maxWidth:700,animation:"fadeIn 0.3s ease"}}>
+          <div style={{fontSize:10,letterSpacing:2,color:T.textMuted,marginBottom:14,textTransform:"uppercase"}}>System Logs — Mock DB</div>
+          <div style={{background:T.bgCard,border:`1px solid ${T.border}`,borderRadius:10,padding:14,maxHeight:"calc(100vh - 200px)",overflowY:"auto",transition:"background 0.4s"}}>
+            {logs.length===0
+              ?<div style={{color:T.textMuted,fontSize:10,padding:"6px 0"}}>No logs yet. Interact with the map to generate entries.</div>
+              :[...logs].reverse().map((log,i)=>(
+                <div key={i} style={{display:"flex",gap:12,marginBottom:5,padding:"4px 0",borderBottom:`1px solid ${T.border}22`}}>
+                  <span style={{color:T.textDim,flexShrink:0,fontSize:9}}>[{new Date(log.ts).toISOString().substr(11,8)}]</span>
+                  <span style={{color:T.accent,flexShrink:0,fontSize:9}}>{log.action}</span>
+                  {log.result&&<span style={{color:log.result.startsWith("200")?T.exit:T.danger,marginLeft:"auto",flexShrink:0,fontSize:9}}>{log.result}</span>}
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
